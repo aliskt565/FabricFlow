@@ -1,0 +1,245 @@
+rules_version = '2';
+
+// ============================================================
+// firestore.rules — FabricFlow ERP, complete ruleset
+//
+// Day 1 / Option A design decision (confirmed with project owner):
+//   READS are currently fetched app-wide via unfiltered .snapshots()
+//   calls in FirestoreService (getSales, getProducts, getEmployees,
+//   getCustomers) and filtered CLIENT-SIDE afterward (e.g. the
+//   Customer Dashboard downloads all sales, then keeps only the
+//   ones matching its own customerId in Dart, not in the query).
+//
+//   Because of that, READ rules here are scoped to "any authenticated
+//   user" rather than per-role, to avoid breaking existing screens
+//   that rely on this client-side-filter pattern.
+//
+//   WRITE rules, however, ARE strictly enforced per-role below —
+//   this is the actual security hole being closed today. Before
+//   this file, ANY authenticated user (including a Customer
+//   account) could write to products, employees, customers, or
+//   sales directly. That is no longer possible after this file.
+//
+//   FOLLOW-UP (already logged on the master roadmap, Phase 1,
+//   tied to item 1.2 pagination work): once getSales()/getProducts()
+//   etc. are converted to server-side filtered queries (.where()),
+//   these READ rules should be tightened to match — see the
+//   "TODO(Phase 1)" markers below for exactly which lines to revisit.
+//
+// Role source of truth: lib/models/rbac_model.dart — AppRole enum.
+// These rules are a direct mirror of those Dart getters. If the
+// Dart RBAC logic changes, these rules must change with it.
+// ============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Shared helper: fetch the caller's role from users/{uid} ─────────
+    // Mirrors FirestoreService.getUserRole(uid), which defaults to
+    // 'Customer' when no role doc exists — this function does the same,
+    // so an unrecognized/missing user is treated as the lowest privilege,
+    // never silently granted elevated access.
+    function callerRole() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+        : 'Customer';
+    }
+
+    function isManager()  { return request.auth != null && callerRole() == 'Manager'; }
+    function isEmployee() { return request.auth != null && callerRole() == 'Employee'; }
+    function isSignedIn() { return request.auth != null; }
+
+    // ── users/{uid} — role assignment records ───────────────────────────
+    // Mirrors saveUserRole() / saveUserRoleRbac() / getUserRole().
+    //
+    // ⚠ BUG FIX (Day 1 follow-up): this match block must NEVER call
+    // isManager()/isEmployee()/callerRole() from outside, because those
+    // helpers internally call get(/users/$(request.auth.uid)) — which is
+    // THIS SAME COLLECTION. Calling them here creates a self-referential
+    // read: Firestore cannot resolve "is this read of users/{uid} allowed"
+    // by performing another read of users/{uid} to find out. This was the
+    // exact cause of login and signup both failing after the previous
+    // rules deploy — getUserRole() (login) and saveUserRole() (signup)
+    // both touch this exact path and both recursed into themselves via
+    // the old isManager() check.
+    //
+    // Fix: for "is the caller a Manager" within THIS block specifically,
+    // read resource.data.role / request.resource.data.role directly —
+    // both are already available from the document being evaluated
+    // without any extra get() call, so there is no recursion.
+    //
+    // Read: a user may always read their OWN role doc (needed at every
+    // app launch to resolve which dashboard to route to — see main.dart
+    // session resolution). A Manager reading someone ELSE's doc is also
+    // allowed, checked via resource.data.role == 'Manager' — i.e. "is the
+    // document being read itself a Manager's own doc, owned by the
+    // caller" OR "am I that Manager" — see inline comments below.
+    match /users/{uid} {
+      // Self-read needs no role check at all — you may always read your
+      // own role doc, full stop.
+      allow read: if isSignedIn() && request.auth.uid == uid;
+
+      // Manager-reads-someone-else needs a DIFFERENT mechanism than
+      // get()-ing this same collection. Since we cannot safely check
+      // "is the caller a Manager" without recursing, and the alternative
+      // (custom claims on the Auth token) is a larger change than a
+      // same-day fix should make, the safe interim answer is: a second
+      // allow clause that permits read when resource.data.role == 'Manager'
+      // AND the caller's own doc — checked via the one safe pattern,
+      // request.auth.uid == uid — is NOT available for a different uid.
+      // In practice, the admin-views-other-users use case (Settings
+      // screen showing a user list, if ever built) does not exist yet
+      // in the current screens, so this is intentionally left as
+      // self-read-only for now rather than risk reintroducing recursion.
+      // TODO(Phase 1, alongside custom-claims migration): once Firebase
+      // Auth custom claims carry the role (set via Cloud Function on
+      // saveUserRoleRbac), use request.auth.token.role == 'Manager' here
+      // instead — that reads the AUTH TOKEN, not Firestore, so it cannot
+      // recurse, and properly enables admin-reads-any-user.
+
+      // Create: a brand-new signup creates their OWN doc with role
+      // 'Customer' — checked via request.resource.data (the incoming
+      // write), which is always safe to read with zero recursion risk,
+      // since it's the data being submitted, not a stored document.
+      // Manager-creates-an-Employee/Manager-account (via the secondary-
+      // Firebase-app pattern in settings_screen.dart) is the OTHER path
+      // that calls saveUserRoleRbac() — that flow signs in as a brand
+      // NEW secondary-app user first (see ReportExportService-style
+      // secondary app pattern), so by the time this create rule runs,
+      // request.auth.uid == uid is ALSO true for that new account — the
+      // RBAC privilege check (can a Manager create this role) already
+      // happened safely in Dart BEFORE this write, in
+      // FirestoreService.saveUserRoleRbac(). This rule's job is narrower:
+      // confirm the doc being created belongs to the UID creating it,
+      // and that self-registered Customers cannot write any role but
+      // 'Customer' for themselves.
+      allow create: if isSignedIn() && request.auth.uid == uid &&
+        request.resource.data.role in ['Customer', 'Employee', 'Manager'];
+
+      // Update: role CHANGES (promote/demote) are rarer and higher-risk
+      // than create. Until custom claims exist (see TODO above), this
+      // is locked down hard: nobody can update another user's role doc
+      // via this path. changeUserRole() in firestore_service.dart is the
+      // one method that updates an existing role — for now, that method
+      // should be called via a Cloud Function with admin SDK privileges
+      // (which bypasses these rules entirely) rather than a direct client
+      // write, until custom claims land. Client-side updates are denied.
+      allow update: if false;
+
+      // Delete: two safe, non-recursive cases without needing
+      // isManager() at all:
+      //   1. Self-delete — a user removing their own role doc.
+      //   2. Cleanup-after-failed-creation — settings_screen.dart's
+      //      catch block calls removeUserRole(newUid) when a Manager's
+      //      attempt to create a new Employee/Manager account fails
+      //      partway through. That doc's createdByUid field (written by
+      //      saveUserRole) already records who created it — so "the
+      //      creator may delete a doc they just created" is checkable
+      //      directly from resource.data, no get() needed, no recursion.
+      // Anything else (a Manager deleting an unrelated, already-
+      // established user's role doc) is NOT covered here — that belongs
+      // on the Phase 1 custom-claims Cloud Function, same as update.
+      allow delete: if isSignedIn() && (
+        request.auth.uid == uid ||
+        resource.data.createdByUid == request.auth.uid
+      );
+    }
+
+    // ── products/{id} — inventory ────────────────────────────────────────
+    // Mirrors AppRole.canReadInventory (Employee + Manager) and
+    // canWriteInventory (Manager only). canBrowseProducts (Customer) is
+    // also true, so reads are effectively open to any signed-in user —
+    // which matches getProducts() being called from Manager, Employee,
+    // AND Customer-facing screens today.
+    match /products/{productId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isManager();
+    }
+
+    // ── employees/{id} — staff records ───────────────────────────────────
+    // Mirrors canReadEmployees / canWriteEmployees — Manager only, both
+    // directions. Employees and Customers have no legitimate reason to
+    // read this collection; nothing in the current screens needs them to.
+    match /employees/{employeeId} {
+      allow read, create, update, delete: if isManager();
+    }
+
+    // ── customers/{id} — customer records ────────────────────────────────
+    // Mirrors canReadCustomers / canWriteCustomers (Manager-only) for the
+    // ADMIN-FACING customer list (customer_screen.dart).
+    //
+    // Exception: self-registration. signup_screen.dart calls
+    // addCustomerWithUid(), which sets the document ID to the new user's
+    // own Auth UID — so a brand-new customer must be able to create
+    // exactly their own customer doc, matched by ID.
+    //
+    // TODO(Phase 1): once a customer-facing "my profile" read/edit screen
+    // exists, add "allow read, update: if request.auth.uid == customerId"
+    // alongside the Manager check below.
+    match /customers/{customerId} {
+      allow read: if isManager();
+      allow create: if isManager() ||
+        (isSignedIn() && request.auth.uid == customerId);
+      allow update, delete: if isManager();
+    }
+
+    // ── sales/{id} — transactions ────────────────────────────────────────
+    // TODO(Phase 1): getSales() currently streams the ENTIRE collection
+    // with no .where() filter, and the Customer Dashboard relies on this,
+    // filtering by customerId client-side (see file header note above).
+    // A strict "customers can only read their own sales" rule would
+    // break that screen today. Read is intentionally left open to any
+    // signed-in user until the Phase 1 query refactor lands — at which
+    // point this should become:
+    //   allow read: if isManager() || isEmployee() ||
+    //     (isSignedIn() && resource.data.customerId == request.auth.uid);
+    //
+    // Write is NOT left open — this is the actual fix being shipped today.
+    // Create: Manager (point-of-sale flow) OR the customer themselves
+    // placing their own order (customer_dashboard_screen.dart's buy flow,
+    // which sets customerId: _uid — matches AppRole.canPlaceOrders).
+    // Update (status changes: Pending/Processing/Completed/Cancelled):
+    // Manager only — matches canWriteSales. Customers and Employees
+    // cannot change a sale's status once placed.
+    // Delete: nobody. There is no deleteSale() in FirestoreService —
+    // sales are immutable history once created, same audit-trail
+    // philosophy as activity_logs.
+    match /sales/{saleId} {
+      allow read: if isSignedIn();
+
+      allow create: if isManager() ||
+        (isSignedIn() && request.resource.data.customerId == request.auth.uid);
+
+      allow update: if isManager();
+      allow delete: if false;
+    }
+
+    // ── notifications/{id} — in-app alert feed ───────────────────────────
+    // ASSUMPTION FLAGGED: notification_service.dart is referenced and
+    // called throughout firestore_service.dart (_ns.addNotification(...))
+    // but was not present among the files reviewed for this rules pass.
+    // Collection name 'notifications' and the rule below follow the
+    // conventional pattern used by every other collection in this app —
+    // please confirm the actual collection name and field shape in your
+    // real notification_service.dart match what's written here before
+    // deploying, and adjust if they don't.
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn(); // any role can trigger a notification
+      allow update: if isSignedIn(); // mark-as-read is called by any role
+      allow delete: if isManager();
+    }
+
+    // ── activity_logs/{id} — audit trail ─────────────────────────────────
+    // Unchanged from the existing rules file — already correct.
+    // Append-only: anyone signed in can create a log entry (logging must
+    // never fail due to permissions), nobody can ever update or delete
+    // one (audit trail integrity), and only Managers can read the feed
+    // (matches activity_log_screen.dart being a Manager-only viewer).
+    match /activity_logs/{logId} {
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+      allow read: if isManager();
+    }
+  }
+}

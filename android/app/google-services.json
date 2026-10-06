@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "905911508726",
+    "project_id": "clothing-erp-42fca",
+    "storage_bucket": "clothing-erp-42fca.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:905911508726:android:bb55089847eeb308a696d7",
+        "android_client_info": {
+          "package_name": "com.example.clothing_erp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBOECPTCk5usVH7udIBb-dATDZCFRq5CU0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:905911508726:android:d7230c2e669c70efa696d7",
+        "android_client_info": {
+          "package_name": "com.example.fabricflow"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBOECPTCk5usVH7udIBb-dATDZCFRq5CU0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

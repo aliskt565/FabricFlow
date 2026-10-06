@@ -1,0 +1,55 @@
+
+
+name: fabricflow
+description: FabricFlow - Smart Clothing ERP System
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '^3.12.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_core: ^3.0.0
+  firebase_auth: ^5.0.0
+  cloud_firestore: ^5.0.0
+  provider: ^6.1.0
+  google_fonts: ^6.1.0
+
+  # ── Charts (in-app) ─────────────────────────────────────────
+  fl_chart: ^0.69.0
+
+  # ── PDF export ───────────────────────────────────────────────
+  pdf: ^3.11.1
+
+  # ── Excel (.xlsx) export ─────────────────────────────────────
+  excel: ^4.0.6
+
+  # ── File system + permissions for saving to Downloads ────────
+  path_provider: ^2.1.4
+  permission_handler: ^11.3.1
+
+  # ── Product images (Cloudinary upload, free tier) ─────────────
+  http: ^1.2.2
+  image_picker: ^1.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+  firebase_core_platform_interface: ^6.0.3
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: false
+  image_path: "assets/icon/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#1A237E"
+  adaptive_icon_foreground: "assets/icon/app_icon.png"
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon/
